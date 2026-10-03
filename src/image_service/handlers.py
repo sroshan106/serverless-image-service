@@ -125,3 +125,17 @@ def list_images(event, _context):
         200,
         {"items": [to_public(item) for item in items], "next_token": encode_next_token(last_key) if last_key else None},
     )
+
+
+@api_handler
+def delete_image(event, _context):
+    caller = caller_id(event)
+    item = repository.get_image(parse_image_id(event))
+    if item is None or not visible_to(item, caller):
+        raise ApiError(404, "not_found", "Image not found")
+    if item["owner_id"] != caller:
+        raise ApiError(403, "forbidden", "Only the owner can delete this image")
+    # Record first: a failed S3 delete leaves an invisible orphan object, never a record pointing at nothing.
+    repository.delete_image(item)
+    storage.delete_object(item["s3_key"])
+    return response(204)
