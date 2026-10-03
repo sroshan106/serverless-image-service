@@ -9,7 +9,6 @@ from image_service.http import ApiError, api_handler, caller_id, json_body, json
 from image_service.repository import AVAILABLE, PENDING
 from image_service.validation import is_uuid, parse_image_id, parse_new_image, sniff_content_type
 
-
 logging.getLogger().setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
