@@ -1,0 +1,18 @@
+version = 0.1
+
+[local.deploy.parameters]
+stack_name = "image-service-local"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+confirm_changeset = false
+fail_on_empty_changeset = false
+parameter_overrides = "PublicS3Endpoint=http://localhost.localstack.cloud:4566 AllowedOrigin=*"
+
+[prod.deploy.parameters]
+stack_name = "image-service-prod"
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+confirm_changeset = true
+fail_on_empty_changeset = false

@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Image upload and storage service
+
+Parameters:
+  PublicS3Endpoint:
+    Type: String
+    Default: ""
+    Description: Host used in presigned URLs. Empty on AWS. LocalStack URL for local.
+  AllowedOrigin:
+    Type: String
+    MinLength: 1
+    Description: CORS origin for the browser UI. "*" locally; an explicit origin such as https://app.example.com in prod.
+
+Globals:
+  Api:
+    # Preflight only. Lambda responses add Access-Control-Allow-Origin themselves (http.response).
+    Cors:
+      AllowMethods: "'GET,POST,DELETE,OPTIONS'"
+      AllowHeaders: "'Content-Type,X-User-Id'"
+      AllowOrigin: !Sub "'${AllowedOrigin}'"
+    # Errors API Gateway produces itself (before Lambda runs) need the header too, or browsers hide them.
+    GatewayResponses:
+      DEFAULT_4XX:
+        ResponseParameters:
+          Headers:
+            Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+      DEFAULT_5XX:
+        ResponseParameters:
+          Headers:
+            Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+  Function:
+    Runtime: python3.12
+    CodeUri: src/
+    Timeout: 10
+    MemorySize: 256
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref ImagesTable
+        # Built with Sub (not Ref) so functions do not depend on the bucket; avoids a circular dependency with the S3 event.
+        BUCKET_NAME: !Sub "${AWS::StackName}-images-${AWS::AccountId}"
+        PUBLIC_S3_ENDPOINT: !Ref PublicS3Endpoint
+        ALLOWED_ORIGIN: !Ref AllowedOrigin
+        LOG_LEVEL: INFO
+
+Resources:
+  ImagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+        - { AttributeName: gsi1pk, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+        - { AttributeName: gsi2pk, AttributeType: S }
+        - { AttributeName: gsi2sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: gsi1
+          KeySchema:
+            - { AttributeName: gsi1pk, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: gsi2
+          KeySchema:
+            - { AttributeName: gsi2pk, KeyType: HASH }
+            - { AttributeName: gsi2sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+
+  ImagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Browser UI: presigned POST upload and fetch of presigned GET URLs.
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: [!Ref AllowedOrigin]
+            AllowedMethods: [GET, POST]
+            AllowedHeaders: ["*"]
+            MaxAge: 3000
+
+  CreateImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: image_service.handlers.create_image
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ImagesTable }
+        - S3WritePolicy: { BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}" }
+      Events:
+        Api: { Type: Api, Properties: { Path: /images, Method: post } }
+
+  ListImagesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: image_service.handlers.list_images
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ImagesTable }
+      Events:
+        Api: { Type: Api, Properties: { Path: /images, Method: get } }
+
+  GetImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: image_service.handlers.get_image
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ImagesTable }
+        - S3ReadPolicy: { BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}" }
+      Events:
+        Api: { Type: Api, Properties: { Path: "/images/{image_id}", Method: get } }
+
+  DownloadImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: image_service.handlers.download_image
+      Policies:
+        - DynamoDBReadPolicy: { TableName: !Ref ImagesTable }
+        - S3ReadPolicy: { BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}" }
+      Events:
+        Api: { Type: Api, Properties: { Path: "/images/{image_id}/download", Method: get } }
+
+  DeleteImageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: image_service.handlers.delete_image
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ImagesTable }
+        - S3CrudPolicy: { BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}" }
+      Events:
+        Api: { Type: Api, Properties: { Path: "/images/{image_id}", Method: delete } }
+
+  ProcessUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: image_service.handlers.process_upload
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref ImagesTable }
+        - S3CrudPolicy: { BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}" }
+      Events:
+        Uploaded:
+          Type: S3
+          Properties:
+            Bucket: !Ref ImagesBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - { Name: prefix, Value: images/ }
+
+Outputs:
+  ApiId:
+    Value: !Ref ServerlessRestApi
+  ApiUrl:
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  TableName:
+    Value: !Ref ImagesTable
+  BucketName:
+    Value: !Ref ImagesBucket
