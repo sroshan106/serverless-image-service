@@ -36,3 +36,6 @@ else
 	sam build
 	sam deploy --config-env $(ENV) --parameter-overrides AllowedOrigin=$(ALLOWED_ORIGIN)
 endif
+
+smoke: install
+	$(LOCAL_AWS) $(BIN)/python scripts/smoke.py
