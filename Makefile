@@ -1,5 +1,7 @@
 VENV := .venv
 BIN := $(VENV)/bin
+# samlocal shells out to `sam`, so put the venv first on PATH.
+export PATH := $(CURDIR)/$(BIN):$(PATH)
 
 
 $(BIN)/activate: requirements-dev.txt
@@ -24,10 +26,10 @@ up:
 down:
 	docker compose down
 
-validate:
+validate: install
 	sam validate --lint --region us-east-1
 
-deploy:
+deploy: install
 ifeq ($(ENV),local)
 	$(LOCAL_AWS) samlocal build
 	$(LOCAL_AWS) samlocal deploy --config-env local

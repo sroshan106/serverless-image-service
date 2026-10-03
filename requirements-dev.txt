@@ -3,3 +3,5 @@ moto[s3,dynamodb]>=5.0
 pytest>=8.0
 pytest-cov>=5.0
 requests>=2.31
+aws-sam-cli>=1.100
+aws-sam-cli-local>=1.0

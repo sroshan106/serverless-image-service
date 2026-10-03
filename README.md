@@ -141,16 +141,14 @@ Owner only. Removes metadata, tag entries and the S3 object. Response `204` with
 
 ## Local development
 
-Requirements: Docker with Compose, Python 3.12, make, pipx, and a free LocalStack account token.
+Requirements: Docker with Compose, Python 3.12, make, and a free LocalStack account token.
 
 ```bash
-pipx install aws-sam-cli                                     # once
-pipx inject --include-apps aws-sam-cli aws-sam-cli-local     # once, provides samlocal
 export LOCALSTACK_AUTH_TOKEN=<your token>                    # never commit it
 ```
 
 ```bash
-make install          # venv with pytest, moto, requests
+make install          # venv with pytest, moto, requests, SAM CLI and samlocal
 make test             # unit tests with a 90% coverage gate (moto, no Docker needed)
 make up               # start LocalStack on 127.0.0.1:4566
 make deploy           # samlocal build + deploy (ENV=local is the default)
