@@ -52,3 +52,11 @@ def inspect_upload(key: str) -> tuple[int, bytes] | None:
 
 def delete_object(key: str) -> None:
     _s3().delete_object(Bucket=config.bucket_name(), Key=key)
+
+
+def presign_download(key: str, filename: str | None = None) -> str:
+    """Presigned GET. With a filename the browser downloads instead of displaying."""
+    params = {"Bucket": config.bucket_name(), "Key": key}
+    if filename:
+        params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
+    return _presign_s3().generate_presigned_url("get_object", Params=params, ExpiresIn=config.DOWNLOAD_URL_TTL_SECONDS)
