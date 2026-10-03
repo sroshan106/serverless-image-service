@@ -50,3 +50,10 @@ def create_pending(user="alice", **fields) -> dict:
     resp = handlers.create_image(api_event("POST", user=user, body=payload), None)
     assert resp["statusCode"] == 201, resp["body"]
     return repository.get_image(body(resp)["image_id"])
+
+
+def upload_image(user="alice", content=JPEG, **fields) -> str:
+    item = create_pending(user, **fields)
+    put_object(item["s3_key"], content)
+    handlers.process_upload(s3_event(item["s3_key"]), None)
+    return item["image_id"]

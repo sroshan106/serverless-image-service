@@ -3,6 +3,7 @@ import functools
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from image_service import config
 
@@ -32,3 +33,22 @@ def presign_upload(key: str, content_type: str) -> dict:
         Conditions=[{"Content-Type": content_type}, ["content-length-range", 1, config.MAX_UPLOAD_BYTES]],
         ExpiresIn=config.UPLOAD_URL_TTL_SECONDS,
     )
+
+
+def inspect_upload(key: str) -> tuple[int, bytes] | None:
+    """Object size and its first 12 bytes (enough for every allowed file signature).
+
+    None when the object is gone (deleted after the event fired), so the event is not retried for nothing.
+    """
+    try:
+        size = _s3().head_object(Bucket=config.bucket_name(), Key=key)["ContentLength"]
+        head = _s3().get_object(Bucket=config.bucket_name(), Key=key, Range="bytes=0-11")["Body"].read()
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            return None
+        raise
+    return size, head
+
+
+def delete_object(key: str) -> None:
+    _s3().delete_object(Bucket=config.bucket_name(), Key=key)
