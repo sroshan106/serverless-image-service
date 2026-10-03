@@ -44,6 +44,7 @@ def aws(monkeypatch):
         "AWS_DEFAULT_REGION": "us-east-1",
         "TABLE_NAME": TABLE,
         "BUCKET_NAME": BUCKET,
+        "TRUST_USER_HEADER": "true",
     }
     for name, value in env.items():
         monkeypatch.setenv(name, value)

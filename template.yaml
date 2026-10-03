@@ -11,6 +11,14 @@ Parameters:
     Type: String
     MinLength: 1
     Description: CORS origin for the browser UI. "*" locally; an explicit origin such as https://app.example.com in prod.
+  TrustUserHeader:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Accept the X-User-Id header as identity. "true" only on LocalStack; prod needs an authorizer.
+
+Conditions:
+  IsAws: !Equals [!Ref PublicS3Endpoint, ""]
 
 Globals:
   Api:
@@ -29,6 +37,12 @@ Globals:
         ResponseParameters:
           Headers:
             Access-Control-Allow-Origin: !Sub "'${AllowedOrigin}'"
+    # Stage wide cap so one client cannot use up the account's request and Lambda concurrency limits.
+    MethodSettings:
+      - ResourcePath: "/*"
+        HttpMethod: "*"
+        ThrottlingRateLimit: 500
+        ThrottlingBurstLimit: 1000
   Function:
     Runtime: python3.12
     CodeUri: src/
@@ -41,6 +55,7 @@ Globals:
         BUCKET_NAME: !Sub "${AWS::StackName}-images-${AWS::AccountId}"
         PUBLIC_S3_ENDPOINT: !Ref PublicS3Endpoint
         ALLOWED_ORIGIN: !Ref AllowedOrigin
+        TRUST_USER_HEADER: !Ref TrustUserHeader
         LOG_LEVEL: INFO
 
 Resources:
@@ -72,6 +87,9 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsAws, true, false]
+      DeletionProtectionEnabled: !If [IsAws, true, false]
 
   ImagesBucket:
     Type: AWS::S3::Bucket
@@ -90,13 +108,33 @@ Resources:
             AllowedHeaders: ["*"]
             MaxAge: 3000
 
+  # AWS only: LocalStack is plain HTTP.
+  ImagesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: IsAws
+    Properties:
+      Bucket: !Ref ImagesBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt ImagesBucket.Arn, !Sub "${ImagesBucket.Arn}/*"]
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
   CreateImageFunction:
     Type: AWS::Serverless::Function
     Properties:
       Handler: image_service.handlers.create_image
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref ImagesTable }
-        - S3WritePolicy: { BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}" }
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:PutItem]
+              Resource: !GetAtt ImagesTable.Arn
+            - Effect: Allow
+              Action: [s3:PutObject]
+              Resource: !Sub "arn:${AWS::Partition}:s3:::${AWS::StackName}-images-${AWS::AccountId}/images/*"
       Events:
         Api: { Type: Api, Properties: { Path: /images, Method: post } }
 
@@ -105,7 +143,10 @@ Resources:
     Properties:
       Handler: image_service.handlers.list_images
       Policies:
-        - DynamoDBReadPolicy: { TableName: !Ref ImagesTable }
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:Query]
+              Resource: [!GetAtt ImagesTable.Arn, !Sub "${ImagesTable.Arn}/index/*"]
       Events:
         Api: { Type: Api, Properties: { Path: /images, Method: get } }
 
@@ -114,8 +155,13 @@ Resources:
     Properties:
       Handler: image_service.handlers.get_image
       Policies:
-        - DynamoDBReadPolicy: { TableName: !Ref ImagesTable }
-        - S3ReadPolicy: { BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}" }
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem]
+              Resource: !GetAtt ImagesTable.Arn
+            - Effect: Allow
+              Action: [s3:GetObject]
+              Resource: !Sub "arn:${AWS::Partition}:s3:::${AWS::StackName}-images-${AWS::AccountId}/images/*"
       Events:
         Api: { Type: Api, Properties: { Path: "/images/{image_id}", Method: get } }
 
@@ -124,8 +170,13 @@ Resources:
     Properties:
       Handler: image_service.handlers.download_image
       Policies:
-        - DynamoDBReadPolicy: { TableName: !Ref ImagesTable }
-        - S3ReadPolicy: { BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}" }
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem]
+              Resource: !GetAtt ImagesTable.Arn
+            - Effect: Allow
+              Action: [s3:GetObject]
+              Resource: !Sub "arn:${AWS::Partition}:s3:::${AWS::StackName}-images-${AWS::AccountId}/images/*"
       Events:
         Api: { Type: Api, Properties: { Path: "/images/{image_id}/download", Method: get } }
 
@@ -134,8 +185,13 @@ Resources:
     Properties:
       Handler: image_service.handlers.delete_image
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref ImagesTable }
-        - S3CrudPolicy: { BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}" }
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:DeleteItem]
+              Resource: !GetAtt ImagesTable.Arn
+            - Effect: Allow
+              Action: [s3:DeleteObject]
+              Resource: !Sub "arn:${AWS::Partition}:s3:::${AWS::StackName}-images-${AWS::AccountId}/images/*"
       Events:
         Api: { Type: Api, Properties: { Path: "/images/{image_id}", Method: delete } }
 
@@ -144,8 +200,23 @@ Resources:
     Properties:
       Handler: image_service.handlers.process_upload
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref ImagesTable }
-        - S3CrudPolicy: { BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}" }
+        - Statement:
+            - Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:PutItem, dynamodb:DeleteItem]
+              Resource: !GetAtt ImagesTable.Arn
+            - Effect: Allow
+              Action: [s3:GetObject, s3:DeleteObject]
+              Resource: !Sub "arn:${AWS::Partition}:s3:::${AWS::StackName}-images-${AWS::AccountId}/images/*"
+            # ListBucket makes a missing object a 404 (handled) rather than a 403.
+            - Effect: Allow
+              Action: [s3:ListBucket]
+              Resource: !Sub "arn:${AWS::Partition}:s3:::${AWS::StackName}-images-${AWS::AccountId}"
+      # Events that still fail after retries land in an SQS queue for redrive, instead of being dropped.
+      EventInvokeConfig:
+        MaximumRetryAttempts: 2
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
       Events:
         Uploaded:
           Type: S3
@@ -161,7 +232,7 @@ Outputs:
   ApiId:
     Value: !Ref ServerlessRestApi
   ApiUrl:
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod"
   TableName:
     Value: !Ref ImagesTable
   BucketName:

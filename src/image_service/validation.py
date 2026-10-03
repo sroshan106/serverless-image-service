@@ -1,6 +1,5 @@
 """Parse and validate client input. Every rejection is a 400/404 ApiError."""
 import base64
-import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -15,7 +14,8 @@ ISO_DATE_PREFIX_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 VISIBILITIES = ("public", "private")
 CREATE_FIELDS = {"title", "description", "tags", "visibility", "content_type"}
 LIST_PARAMS = {"user_id", "tag", "created_from", "created_to", "title", "visibility", "limit", "next_token"}
-KEY_ATTRS = {"pk", "sk", "gsi1pk", "gsi1sk", "gsi2pk", "gsi2sk"}
+# A page cursor is the sort key of an image the caller was allowed to read: "<created_at>#<image_id>".
+CURSOR_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ class ListQuery:
     title: str | None = None
     visibility: str | None = None
     limit: int = DEFAULT_PAGE_SIZE
-    start_key: dict | None = None
+    cursor: str | None = None
 
 
 def _invalid(message: str) -> ApiError:
@@ -109,13 +109,13 @@ def _timestamp(value: str | None, field: str, end_of_day: bool) -> str | None:
         raise _invalid(f"{field} must be an ISO 8601 date (YYYY-MM-DD) or datetime")
     try:
         dt = datetime.fromisoformat(value)
-    except ValueError as exc:
+        if end_of_day and len(value) == 10:  # date only: include the whole day
+            dt = datetime.combine(dt.date(), time.max)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return format_ts(dt)
+    except (ValueError, OverflowError) as exc:  # OverflowError: offsets that push year 9999 past the range
         raise _invalid(f"{field} must be an ISO 8601 date or datetime") from exc
-    if end_of_day and len(value) == 10:  # date only: include the whole day
-        dt = datetime.combine(dt.date(), time.max)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return format_ts(dt)
 
 
 def _limit(value: str | None) -> int:
@@ -130,23 +130,18 @@ def _limit(value: str | None) -> int:
     return limit
 
 
-def encode_next_token(key: dict) -> str:
-    return base64.urlsafe_b64encode(json.dumps(key, separators=(",", ":")).encode()).decode().rstrip("=")
+def encode_next_token(cursor: str) -> str:
+    return base64.urlsafe_b64encode(cursor.encode()).decode().rstrip("=")
 
 
-def decode_next_token(token: str) -> dict:
+def decode_next_token(token: str) -> str:
     try:
-        key = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
-    except ValueError as exc:
+        cursor = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("ascii")
+    except ValueError as exc:  # binascii.Error and UnicodeDecodeError are both ValueErrors
         raise _invalid("next_token is invalid") from exc
-    if (
-        not isinstance(key, dict)
-        or not key
-        or not set(key) <= KEY_ATTRS
-        or not all(isinstance(value, str) for value in key.values())
-    ):
+    if not CURSOR_RE.fullmatch(cursor):
         raise _invalid("next_token is invalid")
-    return key
+    return cursor
 
 
 def parse_list_query(params: dict | None) -> ListQuery:
@@ -178,7 +173,7 @@ def parse_list_query(params: dict | None) -> ListQuery:
         title=title,
         visibility=visibility,
         limit=_limit(params.get("limit")),
-        start_key=decode_next_token(token) if token else None,
+        cursor=decode_next_token(token) if token else None,
     )
 
 

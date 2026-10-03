@@ -3,6 +3,8 @@ import logging
 import os
 from urllib.parse import unquote_plus
 
+from botocore.exceptions import ClientError
+
 from image_service import repository, storage
 from image_service.config import DOWNLOAD_URL_TTL_SECONDS, EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_URL_TTL_SECONDS
 from image_service.http import ApiError, api_handler, caller_id, json_body, json_response, response
@@ -95,11 +97,18 @@ def _process_object(key: str) -> None:
 
 @api_handler
 def get_image(event, _context):
-    item = _viewable_image(event)
+    caller = caller_id(event)
+    item = repository.get_image(parse_image_id(event))
+    if item is None or not visible_to(item, caller):
+        raise ApiError(404, "not_found", "Image not found")
+    if item["status"] != AVAILABLE:
+        # Only the owner gets here: lets a client poll its upload. No URLs until the file is verified.
+        return json_response(200, {**to_public(item), "status": item["status"]})
     return json_response(
         200,
         {
             **to_public(item),
+            "status": item["status"],
             "view_url": storage.presign_download(item["s3_key"]),
             "download_url": storage.presign_download(item["s3_key"], _filename(item)),
             "url_expires_in": DOWNLOAD_URL_TTL_SECONDS,
@@ -117,13 +126,10 @@ def download_image(event, _context):
 def list_images(event, _context):
     caller = caller_id(event)
     query = parse_list_query(event.get("queryStringParameters"))
-    try:
-        items, last_key = repository.list_images(caller, query)
-    except repository.InvalidStartKey as exc:
-        raise ApiError(400, "validation_error", str(exc)) from exc
+    items, cursor = repository.list_images(caller, query)
     return json_response(
         200,
-        {"items": [to_public(item) for item in items], "next_token": encode_next_token(last_key) if last_key else None},
+        {"items": [to_public(item) for item in items], "next_token": encode_next_token(cursor) if cursor else None},
     )
 
 
@@ -137,5 +143,9 @@ def delete_image(event, _context):
         raise ApiError(403, "forbidden", "Only the owner can delete this image")
     # Record first: a failed S3 delete leaves an invisible orphan object, never a record pointing at nothing.
     repository.delete_image(item)
-    storage.delete_object(item["s3_key"])
+    try:
+        storage.delete_object(item["s3_key"])
+    except ClientError:
+        # The image is already gone for every caller; only the bytes leak. Alarm on this line and sweep.
+        logger.exception("Orphaned S3 object after delete: %s", item["s3_key"])
     return response(204)

@@ -1,5 +1,6 @@
 """S3 access: presigned URLs for clients, inspection and cleanup for the service."""
 import functools
+import os
 
 import boto3
 from botocore.config import Config
@@ -7,7 +8,7 @@ from botocore.exceptions import ClientError
 
 from image_service import config
 
-_SIGV4 = Config(signature_version="s3v4")
+_SIGV4 = Config(signature_version="s3v4").merge(config.AWS_CLIENT_CONFIG)
 
 
 @functools.cache
@@ -36,17 +37,22 @@ def presign_upload(key: str, content_type: str) -> dict:
 
 
 def inspect_upload(key: str) -> tuple[int, bytes] | None:
-    """Object size and its first 12 bytes (enough for every allowed file signature).
+    """Object size and its first 12 bytes (enough for every allowed file signature), in one ranged GET.
 
     None when the object is gone (deleted after the event fired), so the event is not retried for nothing.
     """
     try:
-        size = _s3().head_object(Bucket=config.bucket_name(), Key=key)["ContentLength"]
-        head = _s3().get_object(Bucket=config.bucket_name(), Key=key, Range="bytes=0-11")["Body"].read()
+        resp = _s3().get_object(Bucket=config.bucket_name(), Key=key, Range="bytes=0-11")
     except ClientError as exc:
-        if exc.response["Error"]["Code"] in ("404", "NoSuchKey"):
+        code = exc.response["Error"]["Code"]
+        if code in ("404", "NoSuchKey"):
             return None
+        if code == "InvalidRange":  # empty object: no byte 0 to return
+            return 0, b""
         raise
+    head = resp["Body"].read()
+    content_range = resp.get("ContentRange")  # "bytes 0-11/<total size>"
+    size = int(content_range.rsplit("/", 1)[1]) if content_range else resp["ContentLength"]
     return size, head
 
 
@@ -60,3 +66,7 @@ def presign_download(key: str, filename: str | None = None) -> str:
     if filename:
         params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
     return _presign_s3().generate_presigned_url("get_object", Params=params, ExpiresIn=config.DOWNLOAD_URL_TTL_SECONDS)
+
+
+if "AWS_LAMBDA_FUNCTION_NAME" in os.environ:
+    _s3()  # build the client in the init phase, which runs at full CPU, not on the first request

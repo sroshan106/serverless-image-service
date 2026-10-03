@@ -30,6 +30,27 @@ def test_caller_id_reads_header_case_insensitively():
     assert caller_id({"headers": {"X-User-Id": "bob-2"}}) == "bob-2"
 
 
+def test_caller_id_prefers_authorizer_context_over_header():
+    claims = {"requestContext": {"authorizer": {"claims": {"sub": "cognito-sub-1"}}}, "headers": {"X-User-Id": "mallory"}}
+    assert caller_id(claims) == "cognito-sub-1"
+    lambda_auth = {"requestContext": {"authorizer": {"principalId": "bob"}}, "headers": {"X-User-Id": "mallory"}}
+    assert caller_id(lambda_auth) == "bob"
+
+
+def test_caller_id_ignores_header_unless_trusted(monkeypatch):
+    monkeypatch.setenv("TRUST_USER_HEADER", "false")
+    with pytest.raises(ApiError) as exc:
+        caller_id({"headers": {"X-User-Id": "alice"}})
+    assert exc.value.status == 401
+    assert caller_id({"requestContext": {"authorizer": {"principalId": "alice"}}}) == "alice"
+
+
+def test_caller_id_rejects_unsafe_authorizer_ids():
+    with pytest.raises(ApiError) as exc:
+        caller_id({"requestContext": {"authorizer": {"principalId": "auth0|x/../y"}}})
+    assert exc.value.status == 401
+
+
 @pytest.mark.parametrize(
     "headers",
     [None, {}, {"X-User-Id": ""}, {"X-User-Id": "a/b"}, {"X-User-Id": "../x"}, {"X-User-Id": "x" * 65}],

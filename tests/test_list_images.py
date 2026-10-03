@@ -3,7 +3,8 @@ from datetime import datetime
 import pytest
 from helpers import api_event, body, upload_image
 
-from image_service import handlers, repository
+from image_service import config, handlers, repository
+from image_service.validation import decode_next_token
 
 
 @pytest.fixture
@@ -87,11 +88,67 @@ def test_pagination_walks_all_pages(gallery):
     assert second["next_token"] is None
 
 
-def test_next_token_from_other_query_is_rejected(gallery):
-    feed_token = body(list_as("carol", limit="1"))["next_token"]
-    assert list_as("carol", tag="beach", next_token=feed_token)["statusCode"] == 400
-    alice_token = body(list_as("alice", user_id="alice", limit="1"))["next_token"]
-    assert list_as("carol", user_id="bob", next_token=alice_token)["statusCode"] == 400
+def walk(user, **query):
+    """Every page of a query: (all item ids, every cursor handed out)."""
+    found, cursors, token = [], [], None
+    while True:
+        page = body(list_as(user, **query, **({"next_token": token} if token else {})))
+        found += [item["image_id"] for item in page["items"]]
+        token = page["next_token"]
+        if token is None:
+            return found, cursors
+        cursors.append(decode_next_token(token))
+
+
+def test_owner_listing_merges_public_and_private_pages(gallery):
+    g = gallery
+    found, _ = walk("alice", user_id="alice", limit="1")
+    assert found == [g["alice_private"], g["alice_beach"]]
+
+
+def test_tag_listing_pages_across_public_and_own_private(gallery, monkeypatch):
+    g = gallery
+    monkeypatch.setattr(repository, "_now", lambda: datetime.fromisoformat("2026-10-05T10:00:00+00:00"))
+    own_private_beach = upload_image(user="carol", tags=["beach"], visibility="private")
+    found, _ = walk("carol", tag="beach", limit="1")
+    assert found == [own_private_beach, g["bob_beach"], g["alice_beach"]]
+    assert walk("bob", tag="beach", limit="1")[0] == [g["bob_beach"], g["alice_beach"]]
+
+
+def test_cursor_never_points_at_hidden_private_image(gallery):
+    # alice_private is newer than alice_beach, so a filter based design would stop on it first.
+    found, cursors = walk("bob", user_id="alice", limit="1")
+    assert found == [gallery["alice_beach"]]
+    assert not any(gallery["alice_private"] in cursor for cursor in cursors)
+    found, cursors = walk("bob", tag="family", limit="1")
+    assert found == [] and cursors == []
+
+
+def test_filtered_page_is_filled_across_query_rounds(gallery):
+    # The only match is the oldest public image; one call still returns it.
+    page = body(list_as("carol", title="beach", limit="1"))
+    assert [item["image_id"] for item in page["items"]] == [gallery["alice_beach"]]
+
+
+def test_round_budget_returns_cursor_to_continue(gallery, monkeypatch):
+    monkeypatch.setattr(config, "MAX_QUERY_ROUNDS", 1)
+    first = body(list_as("carol", title="beach", limit="1"))
+    assert first["items"] == [] and first["next_token"]
+    assert walk("carol", title="beach", limit="1")[0] == [gallery["alice_beach"]]
+
+
+def test_next_token_reused_with_other_filters_is_a_position_not_an_error(gallery):
+    g = gallery
+    token = body(list_as("carol", limit="1"))["next_token"]  # cursor at bob_city (2026-10-04)
+    assert ids(list_as("carol", tag="beach", next_token=token)) == [g["bob_beach"], g["alice_beach"]]
+    # Cursor below created_from: empty, not a DynamoDB error.
+    assert ids(list_as("carol", created_from="2026-10-05", next_token=token)) == []
+    assert ids(list_as("carol", created_to="2026-10-02", next_token=token)) == [g["alice_beach"]]
+
+
+def test_other_users_private_listing_is_empty(gallery):
+    assert ids(list_as("bob", user_id="alice", visibility="private")) == []
+    assert ids(list_as("bob", tag="family", user_id="alice", visibility="private")) == []
 
 
 def test_list_items_hide_internal_fields(gallery):

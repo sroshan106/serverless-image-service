@@ -1,8 +1,9 @@
 import uuid
 
+from botocore.exceptions import ClientError
 from helpers import api_event, create_pending, object_exists, table, upload_image
 
-from image_service import handlers, repository
+from image_service import handlers, repository, storage
 
 
 def _delete(image_id, user):
@@ -52,3 +53,22 @@ def test_delete_unknown_or_malformed_id_is_404():
 def test_delete_requires_user_header():
     image_id = upload_image()
     assert _delete(image_id, None)["statusCode"] == 401
+
+
+def test_owner_deletes_private_tag_copies():
+    image_id = upload_image(visibility="private", tags=["family"])
+    item = repository.get_image(image_id)
+    assert _delete(image_id, "alice")["statusCode"] == 204
+    assert "Item" not in table().get_item(Key={"pk": "TAG#family#alice", "sk": f"{item['created_at']}#{image_id}"})
+
+
+def test_s3_failure_after_record_delete_still_returns_204(monkeypatch, caplog):
+    image_id = upload_image()
+
+    def fail(_key):
+        raise ClientError({"Error": {"Code": "InternalError"}}, "DeleteObject")
+
+    monkeypatch.setattr(storage, "delete_object", fail)
+    assert _delete(image_id, "alice")["statusCode"] == 204
+    assert repository.get_image(image_id) is None
+    assert "Orphaned S3 object" in caplog.text

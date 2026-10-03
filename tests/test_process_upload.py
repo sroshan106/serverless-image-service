@@ -1,4 +1,7 @@
+from urllib.parse import quote_plus
+
 import pytest
+from botocore.exceptions import ClientError
 from helpers import JPEG, PNG, create_pending, object_exists, put_object, s3_event, table, upload_image
 
 from image_service import handlers, repository
@@ -21,7 +24,7 @@ def test_valid_upload_becomes_available_and_indexed():
     assert stored["status"] == "AVAILABLE"
     assert stored["size_bytes"] == len(JPEG)
     assert "expires_at" not in stored
-    assert stored["gsi1pk"] == "USER#alice"
+    assert stored["gsi1pk"] == "USER#alice#public"
     assert stored["gsi1sk"] == _sort_key(item)
     assert stored["gsi2pk"] == "PUBLIC"
     assert stored["gsi2sk"] == _sort_key(item)
@@ -32,14 +35,43 @@ def test_valid_upload_becomes_available_and_indexed():
         assert copy["status"] == "AVAILABLE"
 
 
-def test_private_upload_is_kept_out_of_public_index():
-    item = create_pending(visibility="private")
+def test_private_upload_is_kept_out_of_public_partitions():
+    item = create_pending(visibility="private", tags=["family"])
     put_object(item["s3_key"], JPEG)
     _process(item["s3_key"])
     stored = repository.get_image(item["image_id"])
     assert stored["status"] == "AVAILABLE"
-    assert stored["gsi1pk"] == "USER#alice"
+    assert stored["gsi1pk"] == "USER#alice#private"
     assert "gsi2pk" not in stored
+    assert "Item" in table().get_item(Key={"pk": "TAG#family#alice", "sk": _sort_key(item)})
+    assert "Item" not in table().get_item(Key={"pk": "TAG#family", "sk": _sort_key(item)})
+
+
+def test_url_encoded_event_key_is_decoded():
+    item = create_pending()
+    put_object(item["s3_key"], JPEG)
+    handlers.process_upload(s3_event(quote_plus(item["s3_key"])), None)
+    assert repository.get_image(item["image_id"])["status"] == "AVAILABLE"
+
+
+def test_empty_object_is_rejected():
+    item = create_pending()
+    put_object(item["s3_key"], b"")
+    _process(item["s3_key"])
+    assert repository.get_image(item["image_id"]) is None
+    assert not object_exists(item["s3_key"])
+
+
+def test_cancelled_publish_while_still_pending_is_retried(monkeypatch):
+    item = create_pending()
+    client = repository._table().meta.client
+
+    def cancelled(**_kwargs):
+        raise ClientError({"Error": {"Code": "TransactionCanceledException"}}, "TransactWriteItems")
+
+    monkeypatch.setattr(client, "transact_write_items", cancelled)
+    with pytest.raises(ClientError):
+        repository.mark_available(item, 10)  # still PENDING: throttle or conflict, so Lambda must retry
 
 
 def test_duplicate_event_is_ignored():

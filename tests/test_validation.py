@@ -95,10 +95,10 @@ def test_parse_list_query_converts_offsets_to_utc():
 
 
 def test_next_token_round_trips_without_padding():
-    key = {"pk": "TAG#beach", "sk": "2026-10-01T00:00:00.000000Z#abc"}
-    token = encode_next_token(key)
+    cursor = f"2026-10-01T00:00:00.000000Z#{IMAGE_ID}"
+    token = encode_next_token(cursor)
     assert "=" not in token
-    assert parse_list_query({"next_token": token}).start_key == key
+    assert parse_list_query({"next_token": token}).cursor == cursor
 
 
 @pytest.mark.parametrize(
@@ -122,6 +122,12 @@ def test_next_token_round_trips_without_padding():
         {"next_token": _raw_token({})},
         {"next_token": _raw_token({"evil": "x"})},
         {"next_token": _raw_token({"pk": 1, "sk": "x"})},
+        {"next_token": encode_next_token("2026-10-01T00:00:00.000000Z")},
+        {"next_token": encode_next_token(f"2026-10-01T00:00:00.000000Z#{IMAGE_ID}" + "x" * 500)},
+        {"next_token": encode_next_token(f"2026-10-01T00:00:00.000000Z#{IMAGE_ID.upper()}")},
+        {"next_token": base64.urlsafe_b64encode(b"\xff\xfe").decode()},
+        {"created_to": "9999-12-31T23:59:59-23:00"},
+        {"created_from": "0001-01-01T00:00:00+23:00"},
     ],
 )
 def test_parse_list_query_rejects_invalid(params):

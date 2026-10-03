@@ -36,11 +36,18 @@ def json_response(status: int, body: dict, headers: dict | None = None) -> dict:
 
 
 def caller_id(event: dict) -> str:
-    # ponytail: identity is trusted from the header; put an API Gateway authorizer in front before real traffic.
-    headers = {key.lower(): value for key, value in (event.get("headers") or {}).items()}
-    user_id = headers.get("x-user-id") or ""
-    if not USER_ID_RE.fullmatch(user_id):
-        raise ApiError(401, "unauthorized", "X-User-Id header is missing or invalid")
+    """Caller from the API Gateway authorizer context; X-User-Id only when TRUST_USER_HEADER is set (local).
+
+    An authorizer does not strip client headers, so the header is never read once identity comes from it.
+    """
+    authorizer = (event.get("requestContext") or {}).get("authorizer") or {}
+    # Cognito user pool authorizers put claims under "claims"; Lambda authorizers set principalId.
+    user_id = (authorizer.get("claims") or {}).get("sub") or authorizer.get("principalId")
+    if not user_id and config.trust_user_header():
+        headers = {key.lower(): value for key, value in (event.get("headers") or {}).items()}
+        user_id = headers.get("x-user-id")
+    if not isinstance(user_id, str) or not USER_ID_RE.fullmatch(user_id):
+        raise ApiError(401, "unauthorized", "Caller identity is missing or invalid")
     return user_id
 
 

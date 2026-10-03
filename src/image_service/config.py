@@ -1,6 +1,8 @@
 """Service constants and environment lookups."""
 import os
 
+from botocore.config import Config
+
 ALLOWED_CONTENT_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
 EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/gif": ".gif"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -10,6 +12,10 @@ DOWNLOAD_URL_TTL_SECONDS = 300
 PENDING_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_PAGE_SIZE = 20
 MAX_PAGE_SIZE = 100
+# Query rounds per list call when filters drop items; bounds read cost per request.
+MAX_QUERY_ROUNDS = 5
+# Defaults (60 s timeouts, legacy retries) outlive the 10 s Lambda timeout.
+AWS_CLIENT_CONFIG = Config(connect_timeout=2, read_timeout=5, retries={"mode": "standard", "max_attempts": 3})
 
 
 def table_name() -> str:
@@ -28,3 +34,8 @@ def public_s3_endpoint() -> str | None:
 def allowed_origin() -> str:
     """CORS origin. The template always sets it; "*" only applies outside Lambda (unit tests)."""
     return os.environ.get("ALLOWED_ORIGIN") or "*"
+
+
+def trust_user_header() -> bool:
+    """Accept X-User-Id without an authorizer. Local development only; prod reads the authorizer context."""
+    return os.environ.get("TRUST_USER_HEADER") == "true"

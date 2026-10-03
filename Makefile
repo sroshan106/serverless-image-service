@@ -34,7 +34,7 @@ ifeq ($(ENV),local)
 	$(LOCAL_AWS) samlocal build
 	$(LOCAL_AWS) samlocal deploy --config-env local
 else
-	@test -n "$(ALLOWED_ORIGIN)" || (echo "ALLOWED_ORIGIN is required for ENV=$(ENV)" && exit 1)
+	@test -n "$(ALLOWED_ORIGIN)" -a "$(ALLOWED_ORIGIN)" != "*" || (echo "ALLOWED_ORIGIN must be an explicit origin for ENV=$(ENV)" && exit 1)
 	sam build
 	sam deploy --config-env $(ENV) --parameter-overrides AllowedOrigin=$(ALLOWED_ORIGIN)
 endif
