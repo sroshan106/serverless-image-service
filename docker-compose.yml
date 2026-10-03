@@ -1,6 +1,6 @@
 services:
   localstack:
-    image: localstack/localstack:latest
+    image: localstack/localstack:2026.9.0
     ports:
       - "127.0.0.1:4566:4566"
     environment:
