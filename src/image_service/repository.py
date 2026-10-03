@@ -5,18 +5,24 @@ Single table layout:
   TAG#<tag> / <created>#<id>  copy of the record per tag, written once AVAILABLE.
 """
 import functools
+import operator
 import time
 import uuid
 from datetime import datetime, timezone
 
 import boto3
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from image_service import config
-from image_service.validation import NewImage, format_ts
+from image_service.validation import ListQuery, NewImage, format_ts
 
 PENDING = "PENDING"
 AVAILABLE = "AVAILABLE"
+
+
+class InvalidStartKey(ValueError):
+    """Pagination key does not belong to the query being run."""
 
 
 @functools.cache
@@ -117,3 +123,44 @@ def delete_image(item: dict) -> None:
     _table().meta.client.transact_write_items(
         TransactItems=[{"Delete": {"TableName": config.table_name(), "Key": key}} for key in keys]
     )
+
+
+def list_images(caller_id: str, q: ListQuery) -> tuple[list[dict], dict | None]:
+    """One key query, newest first. Never scans.
+
+    Partition choice: tag copies, else the owner index, else the public feed.
+    Remaining filters run as a FilterExpression, so a page can hold fewer than q.limit items.
+    """
+    owner = q.user_id or (caller_id if q.visibility == "private" else None)
+    if q.tag:
+        index, part_attr, part_value, sort_attr = None, "pk", f"TAG#{q.tag}", "sk"
+    elif owner:
+        index, part_attr, part_value, sort_attr = "gsi1", "gsi1pk", f"USER#{owner}", "gsi1sk"
+    else:
+        index, part_attr, part_value, sort_attr = "gsi2", "gsi2pk", "PUBLIC", "gsi2sk"
+
+    low = q.created_from or "0"
+    high = (q.created_to or "9999") + "#~"  # "~" sorts after every uuid character
+    filters = [Attr("visibility").eq("public") | Attr("owner_id").eq(caller_id)]
+    if q.tag and q.user_id:
+        filters.append(Attr("owner_id").eq(q.user_id))
+    if q.visibility:
+        filters.append(Attr("visibility").eq(q.visibility))
+    if q.title:
+        # ponytail: contains is a post filter; move title search to OpenSearch if it becomes a primary use case.
+        filters.append(Attr("title_lower").contains(q.title))
+
+    kwargs = {
+        "KeyConditionExpression": Key(part_attr).eq(part_value) & Key(sort_attr).between(low, high),
+        "FilterExpression": functools.reduce(operator.and_, filters),
+        "Limit": q.limit,
+        "ScanIndexForward": False,
+    }
+    if index:
+        kwargs["IndexName"] = index
+    if q.start_key is not None:
+        if set(q.start_key) != {"pk", "sk", part_attr, sort_attr} or q.start_key[part_attr] != part_value:
+            raise InvalidStartKey("next_token does not match this query")
+        kwargs["ExclusiveStartKey"] = q.start_key
+    resp = _table().query(**kwargs)
+    return resp["Items"], resp.get("LastEvaluatedKey")

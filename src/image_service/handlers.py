@@ -7,7 +7,14 @@ from image_service import repository, storage
 from image_service.config import DOWNLOAD_URL_TTL_SECONDS, EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_URL_TTL_SECONDS
 from image_service.http import ApiError, api_handler, caller_id, json_body, json_response, response
 from image_service.repository import AVAILABLE, PENDING
-from image_service.validation import is_uuid, parse_image_id, parse_new_image, sniff_content_type
+from image_service.validation import (
+    encode_next_token,
+    is_uuid,
+    parse_image_id,
+    parse_list_query,
+    parse_new_image,
+    sniff_content_type,
+)
 
 logging.getLogger().setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -104,3 +111,17 @@ def get_image(event, _context):
 def download_image(event, _context):
     item = _viewable_image(event)
     return response(302, headers={"Location": storage.presign_download(item["s3_key"], _filename(item))})
+
+
+@api_handler
+def list_images(event, _context):
+    caller = caller_id(event)
+    query = parse_list_query(event.get("queryStringParameters"))
+    try:
+        items, last_key = repository.list_images(caller, query)
+    except repository.InvalidStartKey as exc:
+        raise ApiError(400, "validation_error", str(exc)) from exc
+    return json_response(
+        200,
+        {"items": [to_public(item) for item in items], "next_token": encode_next_token(last_key) if last_key else None},
+    )
