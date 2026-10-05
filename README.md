@@ -59,6 +59,7 @@ Why this shape:
 * Every Lambda is stateless and DynamoDB runs on demand, so concurrent users scale horizontally with no shared locks or counters.
 * Every list filter maps to DynamoDB key queries. No table scans. Public and private images live in separate partitions, so a query only reads what the caller may see.
 * S3 enforces size and content type through the presigned POST policy. The processor checks again, including the real file signature, so a renamed PDF never becomes visible.
+* Code is layered: `handlers` (event in, response out) → `service` (access rules, upload verification) → `repository` (DynamoDB) and `storage` (S3). See [docs/SPEC.md](docs/SPEC.md) section 3.1.
 
 ## API reference
 

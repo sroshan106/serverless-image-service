@@ -4,7 +4,7 @@ import pytest
 from botocore.exceptions import ClientError
 from helpers import JPEG, PNG, create_pending, object_exists, put_object, s3_event, table, upload_image
 
-from image_service import handlers, repository
+from image_service import handlers, repository, service
 
 
 def _process(key):
@@ -92,7 +92,7 @@ def test_content_not_matching_declared_type_is_rejected(content):
 
 
 def test_oversized_upload_is_rejected(monkeypatch):
-    monkeypatch.setattr(handlers, "MAX_UPLOAD_BYTES", 10)
+    monkeypatch.setattr(service, "MAX_UPLOAD_BYTES", 10)
     item = create_pending()
     put_object(item["s3_key"], JPEG)
     _process(item["s3_key"])

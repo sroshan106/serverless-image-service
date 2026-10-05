@@ -1,25 +1,18 @@
-"""Lambda entry points. One function per API route plus the S3 upload processor."""
+"""Lambda entry points. One function per API route plus the S3 upload processor.
+
+Each handler parses the event, calls one use case in service, and shapes the response.
+"""
 import logging
 import os
 from urllib.parse import unquote_plus
 
-from botocore.exceptions import ClientError
-
-from image_service import repository, storage
-from image_service.config import DOWNLOAD_URL_TTL_SECONDS, EXTENSIONS, MAX_UPLOAD_BYTES, UPLOAD_URL_TTL_SECONDS
-from image_service.http import ApiError, api_handler, caller_id, json_body, json_response, response
-from image_service.repository import AVAILABLE, PENDING
-from image_service.validation import (
-    encode_next_token,
-    is_uuid,
-    parse_image_id,
-    parse_list_query,
-    parse_new_image,
-    sniff_content_type,
-)
+from image_service import service
+from image_service.config import DOWNLOAD_URL_TTL_SECONDS, UPLOAD_URL_TTL_SECONDS
+from image_service.http import api_handler, caller_id, json_body, json_response, response
+from image_service.models import Status
+from image_service.validation import encode_next_token, parse_image_id, parse_list_query, parse_new_image
 
 logging.getLogger().setLevel(os.environ.get("LOG_LEVEL", "INFO"))
-logger = logging.getLogger(__name__)
 
 PUBLIC_FIELDS = (
     "image_id", "owner_id", "title", "description", "tags", "visibility", "content_type", "size_bytes", "created_at",
@@ -33,29 +26,9 @@ def to_public(item: dict) -> dict:
     return out
 
 
-def visible_to(item: dict, caller: str) -> bool:
-    return item["owner_id"] == caller or (item["visibility"] == "public" and item["status"] == AVAILABLE)
-
-
-def _viewable_image(event) -> dict:
-    caller = caller_id(event)
-    item = repository.get_image(parse_image_id(event))
-    # 404 (not 403) for other users' private images, so ids cannot be probed.
-    if item is None or item["status"] != AVAILABLE or not visible_to(item, caller):
-        raise ApiError(404, "not_found", "Image not found")
-    return item
-
-
-def _filename(item: dict) -> str:
-    return f"{item['image_id']}{EXTENSIONS[item['content_type']]}"
-
-
 @api_handler
 def create_image(event, _context):
-    owner_id = caller_id(event)
-    new = parse_new_image(json_body(event))
-    item = repository.create_pending(owner_id, new)
-    upload = storage.presign_upload(item["s3_key"], new.content_type)
+    item, upload = service.create_image(caller_id(event), parse_new_image(json_body(event)))
     return json_response(
         201,
         {
@@ -68,65 +41,35 @@ def create_image(event, _context):
 
 
 def process_upload(event, _context):
-    """S3 ObjectCreated handler: verify the object, then publish or reject it."""
+    """S3 ObjectCreated handler."""
     for record in event.get("Records", []):
-        _process_object(unquote_plus(record["s3"]["object"]["key"]))
-
-
-def _process_object(key: str) -> None:
-    image_id = key.rsplit("/", 1)[-1]
-    item = repository.get_image(image_id) if is_uuid(image_id) else None
-    if item is None or item["s3_key"] != key:
-        logger.warning("Deleting object with no matching record: %s", key)
-        storage.delete_object(key)
-        return
-    upload = storage.inspect_upload(key)
-    if upload is None:
-        logger.info("Object already gone: %s", key)
-        return
-    size, head = upload
-    # Checked on every event, so replacing an approved image through a still valid presigned POST is caught too.
-    if size > MAX_UPLOAD_BYTES or sniff_content_type(head) != item["content_type"]:
-        logger.warning("Rejecting upload %s (size=%s)", key, size)
-        repository.delete_image(item)
-        storage.delete_object(key)
-        return
-    if item["status"] == PENDING and not repository.mark_available(item, size):
-        logger.info("Upload already processed: %s", key)
+        service.process_upload(unquote_plus(record["s3"]["object"]["key"]))
 
 
 @api_handler
 def get_image(event, _context):
-    caller = caller_id(event)
-    item = repository.get_image(parse_image_id(event))
-    if item is None or not visible_to(item, caller):
-        raise ApiError(404, "not_found", "Image not found")
-    if item["status"] != AVAILABLE:
-        # Only the owner gets here: lets a client poll its upload. No URLs until the file is verified.
-        return json_response(200, {**to_public(item), "status": item["status"]})
-    return json_response(
-        200,
-        {
-            **to_public(item),
-            "status": item["status"],
-            "view_url": storage.presign_download(item["s3_key"]),
-            "download_url": storage.presign_download(item["s3_key"], _filename(item)),
+    item = service.get_image(caller_id(event), parse_image_id(event))
+    body = {**to_public(item), "status": item["status"]}
+    # No URLs until the file is verified; only the owner sees a non AVAILABLE image.
+    if item["status"] == Status.AVAILABLE:
+        body |= {
+            "view_url": service.view_url(item),
+            "download_url": service.download_url(item),
             "url_expires_in": DOWNLOAD_URL_TTL_SECONDS,
-        },
-    )
+        }
+    return json_response(200, body)
 
 
 @api_handler
 def download_image(event, _context):
-    item = _viewable_image(event)
-    return response(302, headers={"Location": storage.presign_download(item["s3_key"], _filename(item))})
+    item = service.get_available_image(caller_id(event), parse_image_id(event))
+    return response(302, headers={"Location": service.download_url(item)})
 
 
 @api_handler
 def list_images(event, _context):
     caller = caller_id(event)
-    query = parse_list_query(event.get("queryStringParameters"))
-    items, cursor = repository.list_images(caller, query)
+    items, cursor = service.list_images(caller, parse_list_query(event.get("queryStringParameters")))
     return json_response(
         200,
         {"items": [to_public(item) for item in items], "next_token": encode_next_token(cursor) if cursor else None},
@@ -135,17 +78,5 @@ def list_images(event, _context):
 
 @api_handler
 def delete_image(event, _context):
-    caller = caller_id(event)
-    item = repository.get_image(parse_image_id(event))
-    if item is None or not visible_to(item, caller):
-        raise ApiError(404, "not_found", "Image not found")
-    if item["owner_id"] != caller:
-        raise ApiError(403, "forbidden", "Only the owner can delete this image")
-    # Record first: a failed S3 delete leaves an invisible orphan object, never a record pointing at nothing.
-    repository.delete_image(item)
-    try:
-        storage.delete_object(item["s3_key"])
-    except ClientError:
-        # The image is already gone for every caller; only the bytes leak. Alarm on this line and sweep.
-        logger.exception("Orphaned S3 object after delete: %s", item["s3_key"])
+    service.delete_image(caller_id(event), parse_image_id(event))
     return response(204)

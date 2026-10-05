@@ -91,14 +91,16 @@ client ──GET/DELETE /images...──▶ API Gateway ─▶ list / get / down
 
 | Module | Responsibility |
 |---|---|
-| `handlers.py` | One Lambda entry point per route plus the S3 processor. Orchestration and authorization rules only. |
+| `handlers.py` | One Lambda entry point per route plus the S3 processor. Parses the event, calls one use case, shapes the response. |
+| `service.py` | Use cases: visibility and ownership rules, upload verification, orchestration of repository and storage. No event shapes. |
+| `models.py` | `Status` and `Visibility` as `StrEnum`. |
 | `http.py` | API Gateway proxy parsing, caller identity, JSON responses, `ApiError` to HTTP mapping, CORS header. |
 | `validation.py` | All client input parsing. Returns frozen dataclasses (`NewImage`, `ListQuery`). File signature sniffing. |
 | `repository.py` | DynamoDB single table access. Atomic publish and delete with `TransactWriteItems`. |
 | `storage.py` | S3 presigned POST and GET, upload inspection, object deletion. |
 | `config.py` | Limits and environment lookups. |
 
-Dependency direction: handlers → (http, validation, repository, storage) → config. Domain rules do not import boto3; adapters do.
+Dependency direction: handlers → (http, validation) and service → (repository, storage) → (models, config). Handlers never touch repository or storage; service never sees API Gateway events. Domain rules do not import boto3; adapters do.
 
 ### 3.2 Lambda functions
 
@@ -223,7 +225,7 @@ Error body: `{"error": {"code": "...", "message": "..."}}`. Unexpected failures 
 
 | Layer | Tooling | Scope |
 |---|---|---|
-| Unit | pytest + moto (S3, DynamoDB), 90% coverage gate | Validation, HTTP helpers, every handler, processor edge cases (stray key, oversize, wrong signature, duplicate event, missing object, lost race), list filters and pagination, authorization matrix. |
+| Unit | pytest + moto (S3, DynamoDB), 90% coverage gate | Validation, HTTP helpers, every handler (through to service, repository and storage), processor edge cases (stray key, oversize, wrong signature, duplicate event, missing object, lost race), list filters and pagination, authorization matrix. |
 | End to end | `scripts/smoke.py` against LocalStack | 401, create, owner sees PENDING, real upload, processor publish, list by tag, user, title, date range and paging, private image isolation, signature rejection, get, download redirect, CORS, delete with S3 and tag copy checks, oversize. |
 
 Commands: `make test`, `make up`, `make deploy`, `make smoke`.

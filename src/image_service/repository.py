@@ -21,10 +21,8 @@ from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from image_service import config
+from image_service.models import Status, Visibility
 from image_service.validation import ListQuery, NewImage, format_ts
-
-PENDING = "PENDING"
-AVAILABLE = "AVAILABLE"
 
 
 # (index, partition attribute, sort attribute) per key layout.
@@ -56,7 +54,7 @@ def _owner_partition(owner_id: str, visibility: str) -> str:
 
 def _tag_partition(tag: str, owner_id: str, visibility: str) -> str:
     # Tags and user ids cannot contain "#", so the two shapes never collide.
-    return f"TAG#{tag}" if visibility == "public" else f"TAG#{tag}#{owner_id}"
+    return f"TAG#{tag}" if visibility == Visibility.PUBLIC else f"TAG#{tag}#{owner_id}"
 
 
 def create_pending(owner_id: str, new: NewImage) -> dict:
@@ -72,7 +70,7 @@ def create_pending(owner_id: str, new: NewImage) -> dict:
         "visibility": new.visibility,
         "content_type": new.content_type,
         "s3_key": f"images/{owner_id}/{image_id}",
-        "status": PENDING,
+        "status": Status.PENDING,
         "created_at": format_ts(_now()),
         # DynamoDB TTL removes records whose upload never arrives.
         "expires_at": int(time.time()) + config.PENDING_TTL_SECONDS,
@@ -93,17 +91,17 @@ def mark_available(item: dict, size_bytes: int) -> bool:
     sort_key = _sort_key(item)
     sets = ["#status = :available", "size_bytes = :size", "gsi1pk = :owner", "gsi1sk = :sort"]
     values = {
-        ":available": AVAILABLE,
-        ":pending": PENDING,
+        ":available": Status.AVAILABLE,
+        ":pending": Status.PENDING,
         ":size": size_bytes,
         ":owner": _owner_partition(item["owner_id"], item["visibility"]),
         ":sort": sort_key,
     }
-    if item["visibility"] == "public":
+    if item["visibility"] == Visibility.PUBLIC:
         # ponytail: one PUBLIC partition caps the feed near 1000 writes/s; shard to PUBLIC#0..N if that ever matters.
         sets += ["gsi2pk = :public", "gsi2sk = :sort"]
         values[":public"] = "PUBLIC"
-    published = {**item, "status": AVAILABLE, "size_bytes": size_bytes}
+    published = {**item, "status": Status.AVAILABLE, "size_bytes": size_bytes}
     published.pop("expires_at", None)
     actions = [
         {
@@ -132,7 +130,7 @@ def mark_available(item: dict, size_bytes: int) -> bool:
         if exc.response["Error"]["Code"] != "TransactionCanceledException":
             raise
         current = get_image(item["image_id"])
-        if current is not None and current["status"] == PENDING:
+        if current is not None and current["status"] == Status.PENDING:
             raise  # conflict or throttling, not a lost race: let Lambda retry the S3 event
         return False
     return True
@@ -154,16 +152,16 @@ def _partitions(caller_id: str, q: ListQuery) -> list[tuple]:
 
     Only partitions whose images the caller may see: public ones, plus the caller's own private ones.
     """
-    visibilities = [q.visibility] if q.visibility else ["public", "private"]
-    owner = q.user_id or (caller_id if q.visibility == "private" else None)
+    visibilities = [q.visibility] if q.visibility else list(Visibility)
+    owner = q.user_id or (caller_id if q.visibility == Visibility.PRIVATE else None)
     if owner and owner != caller_id:
-        visibilities = [v for v in visibilities if v == "public"]
+        visibilities = [v for v in visibilities if v == Visibility.PUBLIC]
     if q.tag:
         parts = []
-        if "public" in visibilities:
-            parts.append((*_BY_TAG, _tag_partition(q.tag, "", "public")))
-        if "private" in visibilities and owner in (None, caller_id):
-            parts.append((*_BY_TAG, _tag_partition(q.tag, caller_id, "private")))
+        if Visibility.PUBLIC in visibilities:
+            parts.append((*_BY_TAG, _tag_partition(q.tag, "", Visibility.PUBLIC)))
+        if Visibility.PRIVATE in visibilities and owner in (None, caller_id):
+            parts.append((*_BY_TAG, _tag_partition(q.tag, caller_id, Visibility.PRIVATE)))
         return parts
     if owner:
         return [(*_BY_OWNER, _owner_partition(owner, v)) for v in visibilities]
